@@ -1,6 +1,7 @@
 import createCompress from "compress-brotli";
 import * as vscode from "vscode";
 import { activeEditorFullIO } from "./utils";
+import { base91Decode, base91Encode } from "./base91";
 
 async function showChunkedDataInNewEditor(data: string, chunkSize: number) {
   const document = await vscode.workspace.openTextDocument({ content: "" });
@@ -38,7 +39,7 @@ export async function compressTextInClipboard(
   }
 
   const compressedData = await compress(text);
-  const compressedText = compressedData.toString("base64");
+  const compressedText = base91Encode(compressedData);
 
   if (needChunked(compressedText, chunkSize)) {
     await showChunkedDataInNewEditor(compressedText, chunkSize!);
@@ -65,7 +66,7 @@ export async function compressTextInEditor(
   }
 
   const compressedData = await compress(text);
-  const compressedText = compressedData.toString("base64");
+  const compressedText = base91Encode(compressedData);
 
   if (needChunked(compressedText, chunkSize)) {
     await showChunkedDataInNewEditor(compressedText, chunkSize!);
@@ -83,7 +84,11 @@ export async function compressText(
   config: vscode.WorkspaceConfiguration,
   compress: ReturnType<typeof createCompress>["compress"]
 ) {
-  const chunkSize = config.get<number | null>("compression.chunkSize");
+  const chunkingEnabled =
+    config.get<boolean>("compression.chunkingEnabled") ?? false;
+  const chunkSize = chunkingEnabled
+    ? config.get<number | null>("compression.chunkSize")
+    : null;
   const source = config.get<string>("compression.source");
 
   if (source === "askUser") {
@@ -144,7 +149,7 @@ async function decompressTextInEditor(
 
   text = text.split("\n").join("");
 
-  return decompress(Buffer.from(text, "base64"))
+  return decompress(base91Decode(text))
     .then(async (decompressedText) => {
       await io?.set(decompressedText);
       vscode.window.showInformationMessage("解压并替换完成");
@@ -165,7 +170,7 @@ async function decompressTextInClipboard(
 
   const cleanedText = text.split("\n").join("");
 
-  return decompress(Buffer.from(cleanedText, "base64"))
+  return decompress(base91Decode(cleanedText))
     .then(async (decompressedText) => {
       await vscode.env.clipboard.writeText(decompressedText);
       vscode.window.showInformationMessage("解压并替换完成");

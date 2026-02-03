@@ -12,7 +12,11 @@
   "repository": {
     "url": "https://github.com/LonelySteve/vscode-naruto"
   },
-  "activationEvents": [],
+  "activationEvents": [
+    "onCommand:naruto.compressText",
+    "onCommand:naruto.decompressText",
+    "onCommand:naruto.openCompressionWebview"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
@@ -23,11 +27,20 @@
       {
         "command": "naruto.decompressText",
         "title": "Decompress Text in Editor"
+      },
+      {
+        "command": "naruto.openCompressionWebview",
+        "title": "Open Compression Webview"
       }
     ],
     "configuration": {
       "title": "Naruto Extension Configuration",
       "properties": {
+        "naruto.compression.chunkingEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否启用压缩结果分块"
+        },
         "naruto.compression.chunkSize": {
           "type": [
             "number",

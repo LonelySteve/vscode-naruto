@@ -3,6 +3,7 @@
 import * as vscode from "vscode";
 import createCompress from "compress-brotli";
 import { compressText, decompressText } from "./commands";
+import { openCompressionWebview } from "./webview";
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -26,7 +27,18 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  context.subscriptions.push(compressTextCommand, decompressTextCommand);
+  const openWebviewCommand = vscode.commands.registerCommand(
+    "naruto.openCompressionWebview",
+    async () => {
+      openCompressionWebview(context, compress, decompress);
+    }
+  );
+
+  context.subscriptions.push(
+    compressTextCommand,
+    decompressTextCommand,
+    openWebviewCommand
+  );
 }
 
 // This method is called when your extension is deactivated
