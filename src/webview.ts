@@ -560,6 +560,24 @@ function getWebviewHtml(webview: vscode.Webview) {
         }
         if (message.type === "setInput") {
           applyInput(String(message.text ?? ""), message.mode, message.source);
+          // 如果设置了自动执行，在设置输入后立即执行
+          if (message.autoExecute) {
+            const autoExec = message.autoExecute;
+            const mode = autoExec.mode;
+            if (mode === "compress" || mode === "decompress") {
+              // 使用 setTimeout 确保输入已经设置完成
+              setTimeout(() => {
+                setMode(mode === "compress" ? "压缩中" : "解压中");
+                const size = Number(autoExec.chunkSize);
+                vscode.postMessage({
+                  type: mode,
+                  text: input.value || "",
+                  chunkingEnabled: Boolean(autoExec.chunkingEnabled),
+                  chunkSize: Number.isFinite(size) ? size : null,
+                });
+              }, 50);
+            }
+          }
           return;
         }
         if (message.type === "result") {
@@ -604,7 +622,12 @@ function getWebviewHtml(webview: vscode.Webview) {
 export function openCompressionWebview(
   context: vscode.ExtensionContext,
   compress: CompressFn,
-  decompress: DecompressFn
+  decompress: DecompressFn,
+  options?: {
+    initialText?: string;
+    initialMode?: "compress" | "decompress";
+    source?: "editor" | "clipboard";
+  }
 ) {
   const panel = vscode.window.createWebviewPanel(
     "narutoCompression",
@@ -630,10 +653,32 @@ export function openCompressionWebview(
     });
   }
 
+  function postInitialData() {
+    if (options?.initialText) {
+      const config = vscode.workspace.getConfiguration("naruto");
+      const chunkingEnabled =
+        config.get<boolean>("compression.chunkingEnabled") ?? false;
+      const chunkSize = config.get<number | null>("compression.chunkSize");
+      
+      panel.webview.postMessage({
+        type: "setInput",
+        mode: "replace",
+        source: options.source || "editor",
+        text: options.initialText,
+        autoExecute: options.initialMode ? {
+          mode: options.initialMode,
+          chunkingEnabled,
+          chunkSize: chunkSize || null,
+        } : undefined,
+      });
+    }
+  }
+
   panel.webview.onDidReceiveMessage(async (message) => {
     try {
       if (message.type === "ready") {
         postSettings();
+        postInitialData();
         return;
       }
 

@@ -2,6 +2,7 @@ import createCompress from "compress-brotli";
 import * as vscode from "vscode";
 import { activeEditorFullIO } from "./utils";
 import { base91Decode, base91Encode } from "./base91";
+import { openCompressionWebview } from "./webview";
 
 async function showChunkedDataInNewEditor(data: string, chunkSize: number) {
   const document = await vscode.workspace.openTextDocument({ content: "" });
@@ -82,14 +83,14 @@ export async function compressTextInEditor(
 
 export async function compressText(
   config: vscode.WorkspaceConfiguration,
-  compress: ReturnType<typeof createCompress>["compress"]
+  compress: ReturnType<typeof createCompress>["compress"],
+  decompress: ReturnType<typeof createCompress>["decompress"],
+  context: vscode.ExtensionContext
 ) {
-  const chunkingEnabled =
-    config.get<boolean>("compression.chunkingEnabled") ?? false;
-  const chunkSize = chunkingEnabled
-    ? config.get<number | null>("compression.chunkSize")
-    : null;
   const source = config.get<string>("compression.source");
+
+  let text: string | undefined;
+  let textSource: "editor" | "clipboard" | undefined;
 
   if (source === "askUser") {
     const options: ({ value: string } & vscode.QuickPickItem)[] = [
@@ -112,28 +113,39 @@ export async function compressText(
       return;
     }
     if (selection.value === "clipboard") {
-      await compressTextInClipboard(compress, chunkSize);
+      text = await vscode.env.clipboard.readText();
+      textSource = "clipboard";
+    } else if (selection.value === "activeEditor") {
+      const io = activeEditorFullIO();
+      text = io?.get();
+      textSource = "editor";
+    } else {
+      vscode.window.showErrorMessage("未知的压缩源位置选择");
       return;
     }
-    if (selection.value === "activeEditor") {
-      await compressTextInEditor(compress, chunkSize);
-      return;
-    }
-
+  } else if (source === "clipboard") {
+    text = await vscode.env.clipboard.readText();
+    textSource = "clipboard";
+  } else if (source === "activeEditor") {
+    const io = activeEditorFullIO();
+    text = io?.get();
+    textSource = "editor";
+  } else {
     vscode.window.showErrorMessage("未知的压缩源位置选择");
     return;
   }
 
-  if (source === "clipboard") {
-    await compressTextInClipboard(compress, chunkSize);
-    return;
-  }
-  if (source === "activeEditor") {
-    await compressTextInEditor(compress, chunkSize);
+  if (!text) {
+    vscode.window.showInformationMessage("没有获取到文本内容");
     return;
   }
 
-  vscode.window.showErrorMessage("未知的压缩源位置选择");
+  // 打开 webview 并发送文本
+  openCompressionWebview(context, compress, decompress, {
+    initialText: text,
+    initialMode: "compress",
+    source: textSource,
+  });
 }
 
 async function decompressTextInEditor(
@@ -182,10 +194,14 @@ async function decompressTextInClipboard(
 
 export async function decompressText(
   config: vscode.WorkspaceConfiguration,
-  decompress: ReturnType<typeof createCompress>["decompress"]
+  compress: ReturnType<typeof createCompress>["compress"],
+  decompress: ReturnType<typeof createCompress>["decompress"],
+  context: vscode.ExtensionContext
 ) {
-  const chunkSize = config.get<number | null>("compression.chunkSize");
   const source = config.get<string>("decompression.source");
+
+  let text: string | undefined;
+  let textSource: "editor" | "clipboard" | undefined;
 
   if (source === "askUser") {
     const options: ({ value: string } & vscode.QuickPickItem)[] = [
@@ -208,26 +224,40 @@ export async function decompressText(
       return;
     }
     if (selection.value === "clipboard") {
-      decompressTextInClipboard(decompress);
+      text = await vscode.env.clipboard.readText();
+      textSource = "clipboard";
+    } else if (selection.value === "activeEditor") {
+      const io = activeEditorFullIO();
+      text = io?.get();
+      textSource = "editor";
+    } else {
+      vscode.window.showErrorMessage("未知的解压源位置选择");
       return;
     }
-    if (selection.value === "activeEditor") {
-      decompressTextInEditor(decompress);
-      return;
-    }
-
+  } else if (source === "clipboard") {
+    text = await vscode.env.clipboard.readText();
+    textSource = "clipboard";
+  } else if (source === "activeEditor") {
+    const io = activeEditorFullIO();
+    text = io?.get();
+    textSource = "editor";
+  } else {
     vscode.window.showErrorMessage("未知的解压源位置选择");
     return;
   }
 
-  if (source === "clipboard") {
-    decompressTextInClipboard(decompress);
-    return;
-  }
-  if (source === "activeEditor") {
-    decompressTextInEditor(decompress);
+  if (!text) {
+    vscode.window.showInformationMessage("没有获取到文本内容");
     return;
   }
 
-  vscode.window.showErrorMessage("未知的解压源位置选择");
+  // 对于解压，需要清理换行符
+  const cleanedText = text.split("\n").join("");
+
+  // 打开 webview 并发送文本
+  openCompressionWebview(context, compress, decompress, {
+    initialText: cleanedText,
+    initialMode: "decompress",
+    source: textSource,
+  });
 }

@@ -15,7 +15,7 @@ export function activate(context: vscode.ExtensionContext) {
   const compressTextCommand = vscode.commands.registerCommand(
     "naruto.compressText",
     async () => {
-      await compressText(config, compress);
+      await compressText(config, compress, decompress, context);
     }
   );
 
@@ -23,7 +23,7 @@ export function activate(context: vscode.ExtensionContext) {
   const decompressTextCommand = vscode.commands.registerCommand(
     "naruto.decompressText",
     async () => {
-      await decompressText(config, decompress);
+      await decompressText(config, compress, decompress, context);
     }
   );
 
