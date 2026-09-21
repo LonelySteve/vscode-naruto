@@ -4,10 +4,12 @@ import * as vscode from "vscode";
 import createCompress from "compress-brotli";
 import { compressText, decompressText } from "./commands";
 import { openCompressionWebview } from "./webview";
+import { registerVirtualWorkspace } from "./virtualWorkspace";
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
+  registerVirtualWorkspace(context);
   const { compress, decompress } = createCompress<string, Promise<string>>();
   const config = vscode.workspace.getConfiguration("naruto");
 
