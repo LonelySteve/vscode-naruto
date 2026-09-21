@@ -1,0 +1,12 @@
+{
+  "name": "mac-naruto-receiver",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native macOS receiver for Naruto workspace exports",
+  "scripts": {
+    "compile": "swift build --scratch-path .build",
+    "test": "swift test --scratch-path .build",
+    "package": "node scripts/build-app.mjs",
+    "start": "pnpm run package && open 'dist/Naruto Receiver.app'"
+  }
+}

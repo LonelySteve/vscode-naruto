@@ -6,7 +6,11 @@ settings:
 
 importers:
 
-  .:
+  .: {}
+
+  packages/mac-naruto-receiver: {}
+
+  packages/vscode-naruto:
     dependencies:
       compress-brotli:
         specifier: ^1.3.13

@@ -1,119 +1,59 @@
 # Naruto
 
-Naruto 提供 Brotli + Base91 文本压缩，以及直接关联真实文件的虚拟工作区。
+Naruto 通过 Brotli + Base91 和剪贴板分块，在 VS Code 与 macOS 之间传输工作区文件。
 
-## 虚拟工作区
+## 项目结构
 
-在资源管理器中右键文件或文件夹，选择 **添加到 Naruto 虚拟工作区**（支持多选）。活动栏的 Naruto 入口会打开虚拟工作区文件树，选择项随当前 VS Code 工作区保存。
+这是一个 pnpm workspace，包含两个独立的包：
 
-- 点击文件可打开原文件并编辑。右键菜单支持新建文件、新建文件夹、重命名和删除，操作直接应用于真实工作区。
-- **从 Naruto 虚拟工作区中移除**只隐藏选择项，保留真实文件；也可以单独移除已选目录内的子文件或子目录。
-- 命令面板提供 **将当前文件添加到 Naruto 虚拟工作区**、**将当前文件从 Naruto 虚拟工作区中移除**。
-- VS Code 中的重命名会同步更新虚拟列表；文件新增或删除会刷新文件树，也可以点击标题栏的刷新按钮。
-- 标题栏的新建按钮允许选择真实工作区作为新文件或文件夹的位置。
-
-## 分块导出与导入
-
-1. 点击虚拟工作区标题栏的 **导出**。Naruto 递归读取选中文件夹，生成一份固定快照，首次仅将 **起始元信息块**（明文 JSON）复制到剪贴板。它包含后续数据分块数量和完整压缩文本的校验和。
-2. 粘贴元信息，再点击导出按钮或底部状态栏复制第 1 个数据块，之后每次点击只复制下一个数据块。状态栏从 `0/N · 元信息已复制` 开始，显示 `已复制数据块数/数据块总数`；元信息不计入数据块数量。旁边可取消剩余复制，取消保留当前剪贴板，下一次导出重新生成快照并从元信息块开始。
-3. 接收端按元信息中的数量收齐数据块，按顺序拼接并校验完整性（规则见下文）。元信息不参与拼接。交给 Naruto 解压时数据块可以用换行分隔，不添加编号或其他字符。
-4. 外部使用 Naruto 原有解压方式得到下述 JSON，修改内容或动作，再使用原有压缩方式得到完整文本。现有 **Open Compression Webview** 也可以完成这一过程。
-5. 将完整压缩文本放入剪贴板，点击标题栏的 **导入**。Naruto **只读取一次剪贴板**，解压后按操作顺序应用至真实工作区。
-
-`naruto.virtualWorkspace.chunkSize` 控制每个数据块的字节数，默认 **256**，独立于普通文本压缩设置。起始元信息始终作为一个完整块复制，不受该大小限制。Base91 输出仅含 ASCII，因此每个字符恰好占一个字节。元信息和数据块来自同一次快照，导出期间的后续文件修改不会影响本次传输。最后一个数据块复制后即完成导出，再次点击会开始新快照。
-
-### 起始元信息块（版本 1）
-
-起始块为未压缩的 JSON，格式如下（`checksum.value` 为占位说明）：
-
-```json
-{
-  "format": "naruto-virtual-workspace-export",
-  "version": 1,
-  "chunkCount": 3,
-  "chunkSize": 256,
-  "byteLength": 600,
-  "checksum": {
-    "algorithm": "sha256",
-    "value": "<64 位小写十六进制摘要>"
-  }
-}
-```
-
-- `chunkCount`：后续数据块数量，不包含元信息块。接收端可用 `已接收数据块数/chunkCount` 显示进度，收到指定数量后结束接收。
-- `chunkSize`：每个数据块的最大字节数，最后一块可以不足此长度。
-- `byteLength`：全部数据块按顺序直接拼接后的总字节数。
-- `checksum`：对 **完整 Base91 压缩文本的 UTF-8 字节**计算 SHA-256，输出小写十六进制摘要。计算时不包含元信息，也不插入换行、空格或其他分隔符。
-
-接收端将数据块用 `chunks.join("")` 拼接，核对总字节数，并比较 `SHA256(UTF8(拼接文本))` 与 `checksum.value`；匹配后再解压。此校验在收齐后检查整份数据，可发现缺失、内容变化或顺序错误。导入仍只读取一次剪贴板，剪贴板中应放校验后的完整压缩文本，不包含起始元信息。
-
-## 外部交换格式（版本 1）
-
-导出只包含当前内容，不包含本地已执行的动作历史。文件导出为 `write`，目录导出为 `mkdir`（包括空目录）。外部可修改这些记录或添加操作。
-
-```json
-{
-  "format": "naruto-virtual-workspace",
-  "version": 1,
-  "operations": [
-    {
-      "action": "write",
-      "workspace": "my-project",
-      "path": "src/index.ts",
-      "encoding": "utf8",
-      "content": "console.log('Naruto');\n"
-    },
-    {
-      "action": "mkdir",
-      "workspace": "my-project",
-      "path": "src/features"
-    },
-    {
-      "action": "create",
-      "workspace": "my-project",
-      "path": "src/features/new.ts",
-      "encoding": "utf8",
-      "content": "export const enabled = true;\n"
-    },
-    {
-      "action": "rename",
-      "workspace": "my-project",
-      "path": "src/old.ts",
-      "to": "src/renamed.ts"
-    },
-    {
-      "action": "delete",
-      "workspace": "my-project",
-      "path": "src/unused.ts"
-    }
-  ]
-}
-```
-
-| 动作 | 行为 |
+| 包 | 职责 |
 | --- | --- |
-| `write` | 创建或覆盖文件；`encoding` 为 `utf8` 或 `base64`，`content` 为对应字符串。自动创建父目录。 |
-| `create` | 新建文件；字段同 `write`，同名文件存在时失败。 |
-| `mkdir` | 创建目录及父目录；已有目录保持原状。 |
-| `rename` | 将文件或目录移动到同一工作区的 `to` 相对路径；目标父目录应已存在，不覆盖已有目标。 |
-| `delete` | 删除真实文件或递归删除真实目录。 |
+| [packages/vscode-naruto](packages/vscode-naruto) | VS Code 插件：文本压缩、虚拟工作区、分块导出与导入 |
+| [packages/mac-naruto-receiver](packages/mac-naruto-receiver) | 原生 macOS 接收助手：自动点击采集、解压、浏览文件、复制 ZIP |
 
-`workspace` 必须与当前打开的某个真实工作区根目录的名称唯一匹配。多根工作区以名称区分，导入到另一份副本时可修改该字段。路径使用 `/` 分隔，不能使用绝对路径或 `..`；`.` 仅用于根目录的 `mkdir` 记录，不能删除或重命名真实工作区根目录。
+插件的命令、配置项和版本 1 传输协议保持兼容。完整协议和插件使用说明见 [VS Code 插件文档](packages/vscode-naruto/README.md)。
 
-操作按数组顺序执行。重命名后的内容修改应使用新路径；从数据包中省略某个文件不会删除它，删除必须写明 `delete`。导入成功的项目会出现在虚拟列表中。
+## 使用 macOS 导出助手
 
-文本按 UTF-8 导出，二进制内容按 Base64 无损导出。打开且未保存的文本使用编辑器当前内容；导入遇到会覆盖、删除或重命名未保存文档的操作时，会要求先保存或撤销编辑。符号链接暂不参与导出，导入路径也不能经过符号链接。
-
-压缩方式与原有 Naruto 一致：先将数据包 `JSON.stringify` 成字符串，再交给 `compress-brotli` 的默认 `compress`，最后 Base91 编码。解压执行相反步骤。注意 `compress-brotli` 默认还会对输入字符串做自身的序列化，直接压缩 JSON 的原始字节并不等价。
-
-导入前会校验整个数据包的格式、路径、工作区和未保存文档。文件操作不具有事务性；若后续操作因文件不存在、目标冲突或 IO 错误失败，会停止并报告此前已应用的操作数量。
-
-## 开发与验证
+需要 macOS 13 或更高版本。开发构建需要 Xcode Command Line Tools（Swift 5.9+）、Node.js 和 pnpm 9；生成的 `.app` 无需 Node.js 或其他第三方运行时。
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm run compile
-pnpm test
+pnpm start:mac
 ```
 
-测试在独立临时工作区中运行，覆盖文件操作、导入导出与剪贴板分块。可设置 `VSCODE_EXECUTABLE_PATH` 使用已有 VS Code 可执行文件，避免下载测试版本。
+1. 首次运行，在 **系统设置 → 隐私与安全性 → 辅助功能**中允许 **Naruto Receiver** 模拟点击。应用中的权限按钮会触发系统提示。
+2. 在 VS Code 的 Naruto 虚拟工作区中准备好要导出的文件，将鼠标停在**标题栏的导出按钮**上，不要提前点击。
+3. 按 **⌘⇧E** 并松开按键。助手记录鼠标位置，点击一次并等待起始元信息，之后每收到一个数据块才继续点击。
+4. 鼠标旁的浮窗显示接收进度，不抢焦点且允许鼠标事件穿透。接收时保持目标窗口和按钮位置不变，避免其他剪贴板操作。
+5. 收齐后自动校验 SHA-256、解压并显示文件列表。单击使用默认应用打开；右键可在 Finder 显示或复制内容。文本按原文复制，二进制按 Base64 复制。
+6. 点击 **复制压缩包**，助手把当前导出目录压缩为 ZIP，再把 ZIP **文件对象**写入剪贴板，可在 Finder 或支持文件粘贴的应用中粘贴。
+
+再次按 **⌘⇧E** 可取消接收。取消、超时或校验失败后，需先在 VS Code 中执行 **取消 Naruto 虚拟工作区导出**，再从起始元信息重新导出。助手不会自动重试点击，避免跳过数据块。
+
+关闭结果窗口后，助手继续在菜单栏运行。通过菜单栏可重新打开窗口或退出。每次成功接收使用独立的系统临时目录，保留工作区名称和相对路径；退出应用不会主动删除文件，需长期保存的文件请另存。
+
+## 开发与打包
+
+```sh
+# 两个包一起编译（macOS）
+pnpm compile
+
+# 单独开发或打包插件
+pnpm --filter naruto compile
+pnpm watch
+pnpm package:vsix
+
+# 构建原生 .app（当前机器架构）
+pnpm package:mac
+
+# 测试
+pnpm test:vscode
+pnpm test:mac
+```
+
+VSIX 输出在 `packages/vscode-naruto/`；原生应用输出在 `packages/mac-naruto-receiver/dist/Naruto Receiver.app`。本地构建使用 ad-hoc 签名；对外分发需要 Developer ID 签名及 notarization。辅助功能授权与应用身份相关，重新构建或移动后若权限失效，应在系统设置中重新授权。
+
+VS Code 中按 F5 会调试 `packages/vscode-naruto`。插件测试使用独立临时工作区，可通过 `VSCODE_EXECUTABLE_PATH` 指定现有 VS Code 安装。Swift 测试使用真实插件编码器生成的固定数据，验证协议校验、Brotli/Base91 兼容性、文件还原与 ZIP 内容；修改协议后运行 `pnpm --filter naruto fixtures:receiver` 更新测试数据。
+
+运行 Swift 测试需要完整 Xcode 提供 XCTest。若 `xcode-select` 当前指向 Command Line Tools，可使用 `DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer pnpm test:mac` 单次指定工具链。
