@@ -1,13 +1,13 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { symlink } from "fs/promises";
 import createCompress from "compress-brotli";
 import { base91Decode, base91Encode } from "../base91";
 import { VirtualWorkspace, WorkspaceExporter } from "../virtualWorkspace";
 import {
-  applyFileEdit, applyPacket, decodePacket, encodePacket, parsePacket,
-  snapshotWorkspace, splitExport, WorkspaceOperation, WorkspacePacket,
+  applyFileEdit, applyPacket, createExportBlocks, decodePacket, encodePacket, parsePacket,
+  snapshotWorkspace, splitExport, WorkspaceExportMetadata, WorkspaceOperation, WorkspacePacket,
 } from "../workspaceTransfer";
 
 function memoryState(): vscode.Memento {
@@ -65,6 +65,10 @@ suite("Naruto virtual workspace", () => {
     const oldClipboard = await vscode.env.clipboard.readText();
     try {
       await vscode.commands.executeCommand("naruto.virtualWorkspace.addCurrentFile");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      const metadata: WorkspaceExportMetadata = JSON.parse(await vscode.env.clipboard.readText());
+      assert.strictEqual(metadata.format, "naruto-virtual-workspace-export");
+      assert.strictEqual(metadata.chunkCount, 1);
       await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
       const data = await decodePacket(await vscode.env.clipboard.readText());
       assert.deepStrictEqual(data.operations, [write("current.txt", "current editor")]);
@@ -189,7 +193,26 @@ suite("Naruto virtual workspace", () => {
     assert.strictEqual(await read("first.txt"), "applied");
   });
 
-  test("copies one 256-byte chunk per click from a fixed snapshot and cancellation restarts", async () => {
+  test("metadata describes data blocks without being split or included in the checksum", () => {
+    for (const [length, size, count] of [[3, 256, 1], [256, 256, 1], [512, 256, 2], [513, 256, 3], [3, 1, 3]]) {
+      const text = "A".repeat(length);
+      const [header, ...chunks] = createExportBlocks(text, size);
+      const metadata: WorkspaceExportMetadata = JSON.parse(header);
+      assert.deepStrictEqual(metadata, {
+        format: "naruto-virtual-workspace-export",
+        version: 1,
+        chunkCount: count,
+        chunkSize: size,
+        byteLength: length,
+        checksum: { algorithm: "sha256", value: createHash("sha256").update(text, "utf8").digest("hex") },
+      });
+      assert.strictEqual(chunks.length, count);
+      assert.strictEqual(chunks.join(""), text);
+      assert.ok(chunks.every(chunk => Buffer.byteLength(chunk) <= size));
+    }
+  });
+
+  test("copies metadata first, then one data chunk per click from the same snapshot, and cancellation restarts", async () => {
     await vscode.workspace.fs.writeFile(uri("random.bin"), randomBytes(2048));
     await tree.add([uri("random.bin")]);
     const exported = await tree.exportText();
@@ -200,19 +223,30 @@ suite("Naruto virtual workspace", () => {
     try {
       const received: string[] = [];
       await exporter.next();
-      received.push(await vscode.env.clipboard.readText());
+      const metadata: WorkspaceExportMetadata = JSON.parse(await vscode.env.clipboard.readText());
+      assert.strictEqual(metadata.chunkCount, expected.length);
+      assert.strictEqual(metadata.byteLength, Buffer.byteLength(exported));
       await vscode.workspace.fs.writeFile(uri("random.bin"), randomBytes(2048));
-      for (let i = 1; i < expected.length; i++) {
+      for (let i = 0; i < metadata.chunkCount; i++) {
         await exporter.next();
         received.push(await vscode.env.clipboard.readText());
       }
       assert.deepStrictEqual(received, expected);
       assert.ok(received.every(chunk => Buffer.byteLength(chunk) <= 256));
+      assert.strictEqual(createHash("sha256").update(received.join(""), "utf8").digest("hex"), metadata.checksum.value);
       assert.deepStrictEqual(await decodePacket(received.join("\n")), await decodePacket(exported));
       await exporter.next();
       const first = await vscode.env.clipboard.readText();
+      const nextMetadata: WorkspaceExportMetadata = JSON.parse(first);
+      assert.notStrictEqual(nextMetadata.checksum.value, metadata.checksum.value);
       exporter.cancel();
       assert.strictEqual(await vscode.env.clipboard.readText(), first);
+      await exporter.next();
+      assert.strictEqual(await vscode.env.clipboard.readText(), first);
+      await exporter.next();
+      const firstDataChunk = await vscode.env.clipboard.readText();
+      exporter.cancel();
+      assert.strictEqual(await vscode.env.clipboard.readText(), firstDataChunk);
       await exporter.next();
       assert.strictEqual(await vscode.env.clipboard.readText(), first);
     } finally {

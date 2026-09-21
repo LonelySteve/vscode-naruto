@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { createHash } from "crypto";
 import createCompress from "compress-brotli";
 import { base91Decode, base91Encode } from "./base91";
 
@@ -17,6 +18,15 @@ export interface WorkspacePacket {
   format: "naruto-virtual-workspace";
   version: 1;
   operations: WorkspaceOperation[];
+}
+
+export interface WorkspaceExportMetadata {
+  format: "naruto-virtual-workspace-export";
+  version: 1;
+  chunkCount: number;
+  chunkSize: number;
+  byteLength: number;
+  checksum: { algorithm: "sha256"; value: string };
 }
 
 const codec = createCompress<string, Promise<string>>();
@@ -88,6 +98,22 @@ export function splitExport(text: string, size = 256): string[] {
     chunks.push(text.slice(i, i + size));
   }
   return chunks;
+}
+
+export function createExportBlocks(text: string, size = 256): string[] {
+  const chunks = splitExport(text, size);
+  const metadata: WorkspaceExportMetadata = {
+    format: "naruto-virtual-workspace-export",
+    version: 1,
+    chunkCount: chunks.length,
+    chunkSize: size,
+    byteLength: Buffer.byteLength(text, "utf8"),
+    checksum: {
+      algorithm: "sha256",
+      value: createHash("sha256").update(text, "utf8").digest("hex"),
+    },
+  };
+  return [JSON.stringify(metadata), ...chunks];
 }
 
 export function workspaceLocation(uri: vscode.Uri): Location {

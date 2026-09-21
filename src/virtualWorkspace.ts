@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import {
-  applyFileEdit, applyPacket, containsUri, decodePacket, encodePacket,
-  snapshotWorkspace, splitExport, workspaceLocation,
+  applyFileEdit, applyPacket, containsUri, createExportBlocks, decodePacket, encodePacket,
+  snapshotWorkspace, workspaceLocation,
 } from "./workspaceTransfer";
 
 interface Selection {
@@ -190,7 +190,7 @@ export class WorkspaceExporter implements vscode.Disposable {
         this.cancelItem.show();
         const text = await this.workspace.exportText();
         const size = vscode.workspace.getConfiguration("naruto").get<number>("virtualWorkspace.chunkSize", 256);
-        session.chunks = splitExport(text, size);
+        session.chunks = createExportBlocks(text, size);
       }
       if (this.session !== session) {
         return;
@@ -201,8 +201,12 @@ export class WorkspaceExporter implements vscode.Disposable {
       }
       session.copied++;
       const done = session.copied === session.chunks.length;
-      this.progress.text = `$(clippy) Naruto ${session.copied}/${session.chunks.length}${done ? " 已复制完成" : " · 复制下一块"}`;
-      this.progress.tooltip = done ? "本次导出完成；点击可关闭进度" : "请先粘贴当前分块，再点击复制下一块";
+      const copiedDataChunks = session.copied - 1;
+      const dataChunkCount = session.chunks.length - 1;
+      this.progress.text = `$(clippy) Naruto ${copiedDataChunks}/${dataChunkCount}${done ? " 已复制完成" : copiedDataChunks === 0 ? " · 元信息已复制" : " · 复制下一块"}`;
+      this.progress.tooltip = done ? "本次导出完成；点击可关闭进度" : copiedDataChunks === 0
+        ? "请先粘贴起始元信息，再点击复制第 1 个数据块"
+        : "请先粘贴当前数据块，再点击复制下一块";
       this.progress.command = done ? "naruto.virtualWorkspace.cancelExport" : "naruto.virtualWorkspace.export";
       if (done) {
         this.session = undefined;
