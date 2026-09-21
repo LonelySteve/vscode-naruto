@@ -82,6 +82,42 @@ export class VirtualWorkspace implements vscode.TreeDataProvider<vscode.Uri>, vs
     await this.persist();
   }
 
+  async clear(): Promise<void> {
+    this.roots = [];
+    this.excluded = [];
+    await this.persist();
+  }
+
+  async getSelectedResources(): Promise<string[]> {
+    const resources: string[] = [];
+    const excluded = this.excluded;
+    const visit = async (uri: vscode.Uri, type?: vscode.FileType): Promise<void> => {
+      if (excluded.some(item => containsUri(item, uri))) {
+        return;
+      }
+      try {
+        type ??= (await vscode.workspace.fs.stat(uri)).type;
+        resources.push(uri.toString());
+        // Include links themselves, but never follow them while building menus.
+        if ((type & vscode.FileType.Directory) && !(type & vscode.FileType.SymbolicLink)) {
+          for (const [name, childType] of await vscode.workspace.fs.readDirectory(uri)) {
+            await visit(vscode.Uri.joinPath(uri, name), childType);
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof vscode.FileSystemError && error.code === "FileNotFound")) {
+          throw error;
+        }
+      }
+    };
+    for (const root of this.roots) {
+      if (vscode.workspace.getWorkspaceFolder(root)) {
+        await visit(root);
+      }
+    }
+    return resources;
+  }
+
   async followRenames(files: readonly { oldUri: vscode.Uri; newUri: vscode.Uri }[]): Promise<void> {
     const move = (uri: vscode.Uri) => {
       const file = files.find(item => containsUri(item.oldUri, uri));
@@ -272,6 +308,22 @@ export function registerVirtualWorkspace(context: vscode.ExtensionContext): void
   const view = vscode.window.createTreeView("naruto.virtualWorkspace", { treeDataProvider: workspace, canSelectMany: true });
   context.subscriptions.push(workspace, exporter, view);
 
+  let menuRevision = 0;
+  async function updateMenuContext(): Promise<void> {
+    const revision = ++menuRevision;
+    try {
+      const resources = await workspace.getSelectedResources();
+      // A directory scan must not restore stale menus after a newer selection change.
+      if (revision === menuRevision) {
+        await vscode.commands.executeCommand("setContext", "naruto.virtualWorkspace.resources", resources);
+      }
+    } catch (error) {
+      await vscode.window.showErrorMessage(`Naruto：更新工作区菜单失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  context.subscriptions.push(workspace.onDidChangeTreeData(() => { void updateMenuContext(); }));
+  void updateMenuContext();
+
   function register(id: string, callback: (...args: any[]) => unknown): void {
     context.subscriptions.push(vscode.commands.registerCommand(`naruto.virtualWorkspace.${id}`, async (...args) => {
       try {
@@ -297,6 +349,18 @@ export function registerVirtualWorkspace(context: vscode.ExtensionContext): void
     }
   });
   register("refresh", () => workspace.refresh());
+  register("clear", async () => {
+    const choice = await vscode.window.showWarningMessage(
+      "确定清空 Naruto 虚拟工作区？",
+      { modal: true, detail: "将移除所有虚拟工作区选择项并取消当前导出，真实文件和文件夹不会被删除。" },
+      "清空"
+    );
+    if (choice !== "清空") {
+      return;
+    }
+    await workspace.clear();
+    exporter.cancel();
+  });
   register("rename", async (uri: vscode.Uri) => {
     assertNotWorkspaceRoot(uri);
     const name = await requestName("重命名真实文件或文件夹", path.posix.basename(uri.path));

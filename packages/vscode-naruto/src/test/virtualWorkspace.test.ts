@@ -54,10 +54,156 @@ suite("Naruto virtual workspace", () => {
     assert.ok(extension);
     await extension.activate();
     const commands = await vscode.commands.getCommands(true);
-    for (const id of ["add", "addCurrentFile", "removeCurrentFile", "import", "export", "cancelExport", "rename", "delete", "newFile", "newFolder"]) {
+    for (const id of ["add", "addCurrentFile", "remove", "removeCurrentFile", "clear", "import", "export", "cancelExport", "rename", "delete", "newFile", "newFolder"]) {
       assert.ok(commands.includes(`naruto.virtualWorkspace.${id}`), id);
     }
     assert.strictEqual(extension.packageJSON.contributes.views.naruto[0].id, "naruto.virtualWorkspace");
+  });
+
+  test("context menus use the clicked file URI and support multiple resources", async () => {
+    await vscode.workspace.fs.writeFile(uri("active.txt"), Buffer.from("active"));
+    await vscode.workspace.fs.writeFile(uri("target.txt"), Buffer.from("target"));
+    await vscode.workspace.fs.writeFile(uri("other.txt"), Buffer.from("other"));
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri("active.txt")));
+    const oldClipboard = await vscode.env.clipboard.readText();
+    try {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.add", uri("target.txt"));
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      const data = await decodePacket(await vscode.env.clipboard.readText());
+      assert.deepStrictEqual(data.operations, [write("target.txt", "target")]);
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", uri("target.txt"));
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.add", uri("target.txt"), [uri("target.txt"), uri("other.txt")]);
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", uri("target.txt"), [uri("target.txt"), uri("other.txt")]);
+      assert.strictEqual(await read("target.txt"), "target");
+      assert.strictEqual(await read("other.txt"), "other");
+      assert.strictEqual(vscode.window.activeTextEditor?.document.uri.toString(), uri("active.txt").toString());
+    } finally {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", root);
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.cancelExport");
+      await vscode.env.clipboard.writeText(oldClipboard);
+    }
+  });
+
+  test("clear command requires modal confirmation and leaves files intact", async () => {
+    await vscode.workspace.fs.writeFile(uri("keep.txt"), Buffer.from("keep"));
+    await vscode.commands.executeCommand("naruto.virtualWorkspace.add", uri("keep.txt"));
+    const originalWarning = vscode.window.showWarningMessage;
+    const originalError = vscode.window.showErrorMessage;
+    const oldClipboard = await vscode.env.clipboard.readText();
+    let choice: string | undefined;
+    let warning: unknown[] = [];
+    let errorMessage: unknown;
+    vscode.window.showWarningMessage = (async (...args: unknown[]) => {
+      warning = args;
+      return choice;
+    }) as typeof originalWarning;
+    vscode.window.showErrorMessage = (async (message: string) => {
+      errorMessage = message;
+      return undefined;
+    }) as typeof originalError;
+    try {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.clear");
+      assert.strictEqual((warning[1] as vscode.MessageOptions).modal, true);
+      assert.ok(warning.includes("清空"));
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      assert.deepStrictEqual((await decodePacket(await vscode.env.clipboard.readText())).operations, [write("keep.txt", "keep")]);
+      // Start another export; confirming clear must also cancel its remaining blocks.
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      choice = "清空";
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.clear");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      assert.match(String(errorMessage), /请先将文件或文件夹添加/);
+      assert.strictEqual(await read("keep.txt"), "keep");
+    } finally {
+      vscode.window.showWarningMessage = originalWarning;
+      vscode.window.showErrorMessage = originalError;
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", root);
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.cancelExport");
+      await vscode.env.clipboard.writeText(oldClipboard);
+    }
+  });
+
+  test("clearing persists an empty selection and resets excluded descendants without deleting files", async () => {
+    await vscode.workspace.fs.writeFile(uri("keep.txt"), Buffer.from("keep"));
+    await vscode.workspace.fs.writeFile(uri("hidden.txt"), Buffer.from("hidden"));
+    await tree.add([root]);
+    await tree.remove(uri("hidden.txt"));
+    await tree.clear();
+    assert.deepStrictEqual(await tree.getChildren(), []);
+    assert.deepStrictEqual(await tree.getSelectedResources(), []);
+    assert.strictEqual(await read("keep.txt"), "keep");
+    assert.strictEqual(await read("hidden.txt"), "hidden");
+    tree.dispose();
+    tree = new VirtualWorkspace(state);
+    assert.deepStrictEqual(await tree.getChildren(), []);
+    await tree.add([root]);
+    assert.strictEqual((await tree.getChildren(root)).length, 2);
+  });
+
+  test("menu membership includes descendants, respects exclusions, and restores saved selection", async () => {
+    await vscode.workspace.fs.createDirectory(uri("nested/hidden"));
+    await vscode.workspace.fs.writeFile(uri("nested/space #中文%.txt"), Buffer.from("keep"));
+    await vscode.workspace.fs.writeFile(uri("nested/hidden/file.txt"), Buffer.from("hidden"));
+    await vscode.workspace.fs.writeFile(uri("outside.txt"), Buffer.from("outside"));
+    await tree.add([uri("nested")]);
+    const all = ["nested", "nested/hidden", "nested/hidden/file.txt", "nested/space #中文%.txt"].map(name => uri(name).toString()).sort();
+    assert.deepStrictEqual((await tree.getSelectedResources()).sort(), all);
+    await tree.remove(uri("nested/hidden"));
+    const visible = [uri("nested").toString(), uri("nested/space #中文%.txt").toString()].sort();
+    assert.deepStrictEqual((await tree.getSelectedResources()).sort(), visible);
+    tree.dispose();
+    tree = new VirtualWorkspace(state);
+    assert.deepStrictEqual((await tree.getSelectedResources()).sort(), visible);
+    await tree.add([uri("nested/hidden")]);
+    assert.deepStrictEqual((await tree.getSelectedResources()).sort(), all);
+    await vscode.workspace.fs.writeFile(uri("nested/new.txt"), Buffer.from("new"));
+    assert.ok((await tree.getSelectedResources()).includes(uri("nested/new.txt").toString()));
+    await vscode.workspace.fs.delete(uri("nested/new.txt"));
+    assert.deepStrictEqual((await tree.getSelectedResources()).sort(), all);
+  });
+
+  test("publishes updated menu membership after commands and external file changes", async () => {
+    await vscode.workspace.fs.writeFile(uri("keep.txt"), Buffer.from("keep"));
+    await vscode.workspace.fs.writeFile(uri("hidden.txt"), Buffer.from("hidden"));
+    const originalExecute = vscode.commands.executeCommand;
+    let resources: string[] = [];
+    vscode.commands.executeCommand = ((command: string, ...args: unknown[]) => {
+      if (command === "setContext" && args[0] === "naruto.virtualWorkspace.resources") {
+        resources = args[1] as string[];
+      }
+      return originalExecute(command, ...args);
+    }) as typeof originalExecute;
+    const expectResources = async (names: string[]) => {
+      const expected = names.map(name => name ? uri(name).toString() : root.toString()).sort();
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (JSON.stringify([...resources].sort()) === JSON.stringify(expected)) {
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      assert.deepStrictEqual([...resources].sort(), expected);
+    };
+    try {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.add", root);
+      await expectResources(["", "keep.txt", "hidden.txt"]);
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", uri("hidden.txt"));
+      await expectResources(["", "keep.txt"]);
+      await vscode.workspace.fs.writeFile(uri("new.txt"), Buffer.from("new"));
+      await expectResources(["", "keep.txt", "new.txt"]);
+      const rename = new vscode.WorkspaceEdit();
+      rename.renameFile(uri("keep.txt"), uri("renamed.txt"));
+      await applyFileEdit(rename);
+      await expectResources(["", "renamed.txt", "new.txt"]);
+      await vscode.workspace.fs.delete(uri("new.txt"));
+      await expectResources(["", "renamed.txt"]);
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", root);
+      await expectResources([]);
+    } finally {
+      vscode.commands.executeCommand = originalExecute;
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", root);
+    }
   });
 
   test("standalone skill output applies ordered operations through the real importer", async () => {
