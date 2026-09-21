@@ -1,7 +1,9 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
 import { createHash, randomBytes } from "crypto";
-import { symlink } from "fs/promises";
+import { cp, mkdir, readFile, symlink, writeFile } from "fs/promises";
+import { execFileSync } from "child_process";
+import { join, resolve } from "path";
 import createCompress from "compress-brotli";
 import { base91Decode, base91Encode } from "../base91";
 import { VirtualWorkspace, WorkspaceExporter } from "../virtualWorkspace";
@@ -56,6 +58,54 @@ suite("Naruto virtual workspace", () => {
       assert.ok(commands.includes(`naruto.virtualWorkspace.${id}`), id);
     }
     assert.strictEqual(extension.packageJSON.contributes.views.naruto[0].id, "naruto.virtualWorkspace");
+  });
+
+  test("standalone skill output applies ordered operations through the real importer", async () => {
+    const isolated = join(root.fsPath, "isolated-skill");
+    await cp(resolve(__dirname, "../../../../skills/naruto-import/scripts"), isolated, { recursive: true });
+    const cli = join(isolated, "naruto.mjs");
+    const input = join(isolated, "changes.json");
+    const output = join(isolated, "changes.naruto.txt");
+    const decoded = join(isolated, "decoded.json");
+    const content = "export const message = '你好 🍥';\r\n// $() `quotes` :base64:\r\n";
+    const binary = Buffer.from([0, 255, 128, 10, 13]);
+    await vscode.workspace.fs.writeFile(uri("old.txt"), Buffer.from("old"));
+    await vscode.workspace.fs.writeFile(uri("remove.txt"), Buffer.from("remove"));
+    const changes = packet([
+      { ...location("moved"), action: "mkdir" },
+      { ...location("old.txt"), action: "rename", to: location("moved/new.txt").path },
+      write("moved/new.txt", content),
+      { ...location("binary.bin"), action: "create", encoding: "base64", content: binary.toString("base64") },
+      { ...location("empty"), action: "mkdir" },
+      { ...location("remove.txt"), action: "delete" },
+    ]);
+    await writeFile(input, JSON.stringify(changes));
+    execFileSync("node", [cli, "encode", input, output], { cwd: isolated });
+    const compressed = await readFile(output, "utf8");
+    assert.strictEqual(await tree.importText(compressed), changes.operations.length);
+    assert.strictEqual(await read("moved/new.txt"), content);
+    assert.deepStrictEqual(Buffer.from(await vscode.workspace.fs.readFile(uri("binary.bin"))), binary);
+    assert.strictEqual((await vscode.workspace.fs.stat(uri("empty"))).type, vscode.FileType.Directory);
+    await assert.rejects(async () => vscode.workspace.fs.stat(uri("old.txt")));
+    await assert.rejects(async () => vscode.workspace.fs.stat(uri("remove.txt")));
+    execFileSync("node", [cli, "decode", output, decoded], { cwd: isolated });
+    assert.deepStrictEqual(JSON.parse(await readFile(decoded, "utf8")), changes);
+    const exported = await tree.exportText();
+    await writeFile(output, exported);
+    const exportedJSON = execFileSync("node", [cli, "decode", output], { cwd: isolated, encoding: "utf8" });
+    assert.deepStrictEqual(JSON.parse(exportedJSON), await decodePacket(exported));
+  });
+
+  test("skill rejects invalid import paths before overwriting its output", async () => {
+    const isolated = join(root.fsPath, "isolated-skill");
+    await mkdir(isolated);
+    const cli = resolve(__dirname, "../../../../skills/naruto-import/scripts/naruto.mjs");
+    const input = join(isolated, "changes.json");
+    const output = join(isolated, "changes.naruto.txt");
+    await writeFile(input, JSON.stringify(packet([{ ...write("file.txt", "unsafe"), path: "../outside.txt" }])));
+    await writeFile(output, "keep previous output");
+    assert.throws(() => execFileSync("node", [cli, "encode", input, output], { cwd: isolated, stdio: "pipe" }));
+    assert.strictEqual(await readFile(output, "utf8"), "keep previous output");
   });
 
   test("current-file commands add the real editor file, export it, and remove it without deletion", async () => {

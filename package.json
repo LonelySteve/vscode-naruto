@@ -3,6 +3,7 @@
   "private": true,
   "packageManager": "pnpm@9.15.9",
   "scripts": {
+    "skill:build": "pnpm --filter naruto build:skill",
     "compile": "pnpm --filter naruto compile && pnpm --filter mac-naruto-receiver compile",
     "check-types": "pnpm --filter naruto check-types",
     "lint": "pnpm --filter naruto lint",

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Naruto 导入数据"
+  short_description: "根据修改需求生成可直接导入 Naruto 虚拟工作区的完整压缩数据"
+  default_prompt: "使用 $naruto-import，根据我的新增、修改、删除或重命名需求生成 Naruto 导入数据。"

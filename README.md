@@ -35,6 +35,20 @@ pnpm start:mac
 
 ## 开发与打包
 
+### Codex 导入 skill
+
+项目中的 [naruto-import](skills/naruto-import/SKILL.md) 可根据修改需求生成插件能直接导入的完整压缩文本。Skill 包含协议说明和独立编码脚本，安装后只需 Node.js 18+，不依赖本仓库或 npm 包。
+
+例如向 Codex 提出：`使用 $naruto-import，在工作区 my-project 新增 src/config.ts，将 src/old.ts 重命名为 src/new.ts，并删除 docs/obsolete.md，给出可导入的结果。`
+
+无需先导出工作区；新增文件和删除、重命名等操作可直接根据需求生成。修改已有文件时需要完整原文，可来自用户提供的源码、目录或导出数据。Skill 同时提供辅助解码，便于检查已有数据包。
+
+Codex 会生成操作包 JSON 和 `changes.naruto.txt`，用户复制后者的**文本内容**到剪贴板，再点击 Naruto **导入**，即可修改真实工作区。
+
+本地安装可将 `skills/naruto-import` 整个目录复制到 `${CODEX_HOME:-$HOME/.codex}/skills/`。更新协议实现后，运行 `pnpm skill:build` 重建随 skill 分发的编码器，再更新安装副本；`pnpm test:vscode` 包含独立 skill 与真实插件导入器的兼容性测试。
+
+### 构建命令
+
 ```sh
 # 两个包一起编译（macOS）
 pnpm compile
