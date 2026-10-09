@@ -2,9 +2,9 @@
   "name": "naruto",
   "displayName": "naruto",
   "description": "",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "engines": {
-    "vscode": "^1.100.0"
+    "vscode": "^1.72.0"
   },
   "categories": [
     "Other"
@@ -315,7 +315,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "@types/vscode": "^1.100.0",
+    "@types/vscode": "1.72.0",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.7.1",
