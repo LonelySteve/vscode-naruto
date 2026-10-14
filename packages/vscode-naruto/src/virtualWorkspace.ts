@@ -178,8 +178,8 @@ export class VirtualWorkspace implements vscode.TreeDataProvider<vscode.Uri>, vs
     return item;
   }
 
-  async exportText(): Promise<string> {
-    const roots = await this.getChildren();
+  async exportText(uri?: vscode.Uri): Promise<string> {
+    const roots = uri ? [uri] : await this.getChildren();
     if (!roots.length) {
       throw new Error("请先将文件或文件夹添加到 Naruto 虚拟工作区");
     }
@@ -198,7 +198,7 @@ export class VirtualWorkspace implements vscode.TreeDataProvider<vscode.Uri>, vs
 }
 
 export class WorkspaceExporter implements vscode.Disposable {
-  private session?: { chunks?: string[]; copied: number };
+  private session?: { uri?: vscode.Uri; chunks?: string[]; copied: number };
   private busy = false;
   private readonly progress = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   private readonly cancelItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
@@ -211,12 +211,15 @@ export class WorkspaceExporter implements vscode.Disposable {
     this.cancelItem.tooltip = "取消剩余分块的复制，保留当前剪贴板内容";
   }
 
-  async next(): Promise<void> {
+  async next(uri?: vscode.Uri): Promise<void> {
     if (this.busy) {
       return;
     }
     this.busy = true;
-    const session = this.session ?? { copied: 0 };
+    if (uri && uri.toString() !== this.session?.uri?.toString()) {
+      this.cancel();
+    }
+    const session = this.session ?? { uri, copied: 0 };
     this.session = session;
     try {
       if (!session.chunks) {
@@ -224,7 +227,7 @@ export class WorkspaceExporter implements vscode.Disposable {
         this.progress.command = undefined;
         this.progress.show();
         this.cancelItem.show();
-        const text = await this.workspace.exportText();
+        const text = await this.workspace.exportText(session.uri);
         const size = vscode.workspace.getConfiguration("naruto").get<number>("virtualWorkspace.chunkSize", 256);
         session.chunks = createExportBlocks(text, size);
       }
@@ -419,7 +422,7 @@ export function registerVirtualWorkspace(context: vscode.ExtensionContext): void
       await vscode.commands.executeCommand("vscode.open", destination);
     });
   }
-  register("export", () => exporter.next());
+  register("export", (uri?: vscode.Uri) => exporter.next(uri));
   register("cancelExport", () => exporter.cancel());
   register("import", async () => {
     const text = await vscode.env.clipboard.readText();

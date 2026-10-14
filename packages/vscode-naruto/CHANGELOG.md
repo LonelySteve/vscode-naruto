@@ -4,6 +4,11 @@ All notable changes to the "naruto" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.2.3] - 2026-10-14
+
+- Add an inline export button to every virtual workspace file and folder, preserving workspace paths and excluded descendants.
+- Continue chunked export when clicking the same node, and start a new snapshot when switching nodes.
+
 ## [0.2.2] - 2026-10-09
 
 - Lower the minimum supported VS Code version to 1.72.0 and pin the VS Code API types to the same version.

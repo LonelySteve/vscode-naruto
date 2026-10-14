@@ -2,7 +2,7 @@
   "name": "naruto",
   "displayName": "naruto",
   "description": "",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "engines": {
     "vscode": "^1.72.0"
   },
@@ -267,6 +267,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "naruto.virtualWorkspace.export",
+          "when": "view == naruto.virtualWorkspace",
+          "group": "inline@1"
+        },
         {
           "command": "naruto.virtualWorkspace.newFile",
           "when": "view == naruto.virtualWorkspace",

@@ -294,6 +294,43 @@ suite("Naruto virtual workspace", () => {
     assert.strictEqual((await tree.getChildren(root)).length, 2);
   });
 
+  test("node export scopes files and folders while preserving paths and exclusions", async () => {
+    await vscode.workspace.fs.createDirectory(uri("nested"));
+    await vscode.workspace.fs.writeFile(uri("nested/keep.txt"), Buffer.from("keep"));
+    await vscode.workspace.fs.writeFile(uri("nested/hidden.txt"), Buffer.from("hidden"));
+    await vscode.workspace.fs.writeFile(uri("outside.txt"), Buffer.from("outside"));
+    await tree.add([root]);
+    await tree.remove(uri("nested/hidden.txt"));
+    assert.deepStrictEqual((await decodePacket(await tree.exportText(uri("nested/keep.txt")))).operations,
+      [write("nested/keep.txt", "keep")]);
+    assert.deepStrictEqual((await decodePacket(await tree.exportText(uri("nested")))).operations, [
+      { ...location("nested"), action: "mkdir" }, write("nested/keep.txt", "keep"),
+    ]);
+  });
+
+  test("node export commands continue the same node and restart when switching nodes", async () => {
+    await vscode.workspace.fs.writeFile(uri("first.txt"), Buffer.from("first"));
+    await vscode.workspace.fs.writeFile(uri("second.txt"), Buffer.from("second"));
+    await vscode.commands.executeCommand("naruto.virtualWorkspace.add", root);
+    const oldClipboard = await vscode.env.clipboard.readText();
+    const next = (target?: vscode.Uri) => vscode.commands.executeCommand("naruto.virtualWorkspace.export", target);
+    try {
+      await next(uri("first.txt"));
+      assert.strictEqual(JSON.parse(await vscode.env.clipboard.readText()).chunkCount, 1);
+      await next(uri("second.txt"));
+      assert.strictEqual(JSON.parse(await vscode.env.clipboard.readText()).chunkCount, 1);
+      await next(uri("second.txt"));
+      assert.deepStrictEqual((await decodePacket(await vscode.env.clipboard.readText())).operations, [write("second.txt", "second")]);
+      await next(uri("first.txt"));
+      await next();
+      assert.deepStrictEqual((await decodePacket(await vscode.env.clipboard.readText())).operations, [write("first.txt", "first")]);
+    } finally {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.cancelExport");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", root);
+      await vscode.env.clipboard.writeText(oldClipboard);
+    }
+  });
+
   test("tree opens the real URI and tracks external VS Code rename and delete", async () => {
     await vscode.workspace.fs.writeFile(uri("before.txt"), Buffer.from("before"));
     await tree.add([uri("before.txt")]);
