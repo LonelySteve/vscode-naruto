@@ -8,6 +8,7 @@ let package = Package(
     targets: [
         .target(name: "NarutoTransfer"),
         .executableTarget(name: "NarutoReceiver", dependencies: ["NarutoTransfer"]),
-        .testTarget(name: "NarutoTransferTests", dependencies: ["NarutoTransfer"], resources: [.copy("Fixtures")])
+        .testTarget(name: "NarutoTransferTests", dependencies: ["NarutoTransfer"], resources: [.copy("Fixtures")]),
+        .testTarget(name: "NarutoReceiverTests", dependencies: ["NarutoReceiver"])
     ]
 )
