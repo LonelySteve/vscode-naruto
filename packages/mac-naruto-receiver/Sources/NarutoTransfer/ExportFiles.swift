@@ -13,21 +13,64 @@ public struct ExportedFiles: Sendable {
     public let items: [ExportedItem]
     public var fileCount: Int { items.filter { !$0.isDirectory }.count }
 
-    public static func extract(_ packet: WorkspacePacket, temporaryDirectory: URL = FileManager.default.temporaryDirectory) throws -> Self {
+    public static let snapshotDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("NarutoReceiver/Snapshots", isDirectory: true)
+
+    public static func checkBaseline(_ snapshot: WorkspacePacket.Snapshot?,
+                                     snapshotDirectory: URL = Self.snapshotDirectory) throws {
+        guard let snapshot, let base = snapshot.base else { return }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: snapshotDirectory.appendingPathComponent(base).path) ||
+              fm.fileExists(atPath: snapshotDirectory.appendingPathComponent(snapshot.id).path) else {
+            throw TransferError("接收端缺少本次增量对应的副本。请取消 VS Code 当前导出，右键项目切换为全量导出模式，再重新导出。")
+        }
+    }
+
+    public static func extract(_ packet: WorkspacePacket,
+                               temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+                               snapshotDirectory: URL = Self.snapshotDirectory) throws -> Self {
+        try checkBaseline(packet.snapshot, snapshotDirectory: snapshotDirectory)
         let fm = FileManager.default
         let root = temporaryDirectory.appendingPathComponent("naruto-\(UUID().uuidString)", isDirectory: true)
         let directory = root.appendingPathComponent("resources", isDirectory: true)
-        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
         do {
-            for op in packet.operations {
-                let workspace = directory.appendingPathComponent(op.workspace, isDirectory: true)
-                let target = op.path == "." ? workspace : workspace.appendingPathComponent(op.path)
-                if op.action == "mkdir" {
-                    try fm.createDirectory(at: target, withIntermediateDirectories: true)
+            let cached = packet.snapshot.map { snapshotDirectory.appendingPathComponent($0.id, isDirectory: true) }
+            if let cached, fm.fileExists(atPath: cached.path) {
+                // A retransmission can reuse the already completed, immutable snapshot.
+                try fm.copyItem(at: cached, to: directory)
+            } else {
+                if let base = packet.snapshot?.base {
+                    let source = snapshotDirectory.appendingPathComponent(base, isDirectory: true)
+                    try fm.copyItem(at: source, to: directory)
                 } else {
-                    try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    let bytes = op.encoding == "base64" ? Data(base64Encoded: op.content!)! : Data(op.content!.utf8)
-                    try bytes.write(to: target)
+                    try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+                }
+                for location in packet.replace ?? [] {
+                    let workspace = directory.appendingPathComponent(location.workspace, isDirectory: true)
+                    let target = location.path == "." ? workspace : workspace.appendingPathComponent(location.path)
+                    if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
+                }
+                for op in packet.operations {
+                    let workspace = directory.appendingPathComponent(op.workspace, isDirectory: true)
+                    let target = op.path == "." ? workspace : workspace.appendingPathComponent(op.path)
+                    switch op.action {
+                    case "delete":
+                        if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
+                    case "mkdir":
+                        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                    default:
+                        try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        let bytes = op.encoding == "base64" ? Data(base64Encoded: op.content!)! : Data(op.content!.utf8)
+                        try bytes.write(to: target)
+                    }
+                }
+                if let cached {
+                    try fm.createDirectory(at: snapshotDirectory, withIntermediateDirectories: true)
+                    let staging = snapshotDirectory.appendingPathComponent("pending-\(UUID().uuidString)", isDirectory: true)
+                    defer { try? fm.removeItem(at: staging) }
+                    try fm.copyItem(at: directory, to: staging)
+                    try fm.moveItem(at: staging, to: cached)
                 }
             }
             var items: [ExportedItem] = []

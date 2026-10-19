@@ -6,7 +6,7 @@ import { execFileSync } from "child_process";
 import { join, resolve } from "path";
 import createCompress from "compress-brotli";
 import { base91Decode, base91Encode } from "../base91";
-import { VirtualWorkspace, WorkspaceExporter } from "../virtualWorkspace";
+import { VirtualWorkspace, WorkspaceExporter, selectedExportScope } from "../virtualWorkspace";
 import {
   applyFileEdit, applyPacket, createExportBlocks, decodePacket, encodePacket, parsePacket,
   snapshotWorkspace, splitExport, WorkspaceExportMetadata, WorkspaceOperation, WorkspacePacket,
@@ -27,6 +27,7 @@ suite("Naruto virtual workspace", () => {
   let tree: VirtualWorkspace;
   let state: vscode.Memento;
   let sequence = 0;
+  const originalInformation = vscode.window.showInformationMessage;
   const uri = (name: string) => vscode.Uri.joinPath(root, name);
   const read = async (name: string) => Buffer.from(await vscode.workspace.fs.readFile(uri(name))).toString("utf8");
   const location = (name: string) => ({ workspace: folder.name, path: `${root.path.slice(folder.uri.path.length + 1)}/${name}` });
@@ -35,6 +36,7 @@ suite("Naruto virtual workspace", () => {
   const apply = (data: WorkspacePacket) => applyPacket(data, async () => {});
 
   setup(async () => {
+    vscode.window.showInformationMessage = (async () => undefined) as typeof originalInformation;
     folder = vscode.workspace.workspaceFolders![0];
     assert.ok(folder, "Tests must run in the temporary workspace from .vscode-test.mjs");
     root = vscode.Uri.joinPath(folder.uri, `case-${sequence++}`);
@@ -44,6 +46,7 @@ suite("Naruto virtual workspace", () => {
   });
 
   teardown(async () => {
+    vscode.window.showInformationMessage = originalInformation;
     tree.dispose();
     await vscode.commands.executeCommand("workbench.action.closeAllEditors");
     await vscode.workspace.fs.delete(root, { recursive: true });
@@ -54,7 +57,7 @@ suite("Naruto virtual workspace", () => {
     assert.ok(extension);
     await extension.activate();
     const commands = await vscode.commands.getCommands(true);
-    for (const id of ["add", "addCurrentFile", "remove", "removeCurrentFile", "clear", "import", "export", "cancelExport", "rename", "delete", "newFile", "newFolder"]) {
+    for (const id of ["add", "addCurrentFile", "remove", "removeCurrentFile", "clear", "import", "export", "cancelExport", "setIncrementalMode", "setFullMode", "filter", "clearFilter", "sortAdded", "sortFiles", "rename", "delete", "newFile", "newFolder"]) {
       assert.ok(commands.includes(`naruto.virtualWorkspace.${id}`), id);
     }
     assert.strictEqual(extension.packageJSON.contributes.views.naruto[0].id, "naruto.virtualWorkspace");
@@ -106,15 +109,22 @@ suite("Naruto virtual workspace", () => {
       await vscode.commands.executeCommand("naruto.virtualWorkspace.clear");
       assert.strictEqual((warning[1] as vscode.MessageOptions).modal, true);
       assert.ok(warning.includes("清空"));
-      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
-      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.exportFull");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.exportFull");
       assert.deepStrictEqual((await decodePacket(await vscode.env.clipboard.readText())).operations, [write("keep.txt", "keep")]);
       // Start another export; confirming clear must also cancel its remaining blocks.
-      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.exportFull");
       choice = "清空";
       await vscode.commands.executeCommand("naruto.virtualWorkspace.clear");
       await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
-      assert.match(String(errorMessage), /请先将文件或文件夹添加/);
+      const header = JSON.parse(await vscode.env.clipboard.readText()) as WorkspaceExportMetadata;
+      const chunks: string[] = [];
+      for (let i = 0; i < header.chunkCount; i++) {
+        await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+        chunks.push(await vscode.env.clipboard.readText());
+      }
+      assert.deepStrictEqual((await decodePacket(chunks.join(""))).operations, [{ ...location("keep.txt"), action: "delete" }]);
+      assert.strictEqual(errorMessage, undefined);
       assert.strictEqual(await read("keep.txt"), "keep");
     } finally {
       vscode.window.showWarningMessage = originalWarning;
@@ -261,7 +271,7 @@ suite("Naruto virtual workspace", () => {
     const oldClipboard = await vscode.env.clipboard.readText();
     try {
       await vscode.commands.executeCommand("naruto.virtualWorkspace.addCurrentFile");
-      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.exportFull");
       const metadata: WorkspaceExportMetadata = JSON.parse(await vscode.env.clipboard.readText());
       assert.strictEqual(metadata.format, "naruto-virtual-workspace-export");
       assert.strictEqual(metadata.chunkCount, 1);
@@ -294,6 +304,126 @@ suite("Naruto virtual workspace", () => {
     assert.strictEqual((await tree.getChildren(root)).length, 2);
   });
 
+  test("root sorting switches between insertion order and natural Explorer order and persists", async () => {
+    await vscode.workspace.fs.createDirectory(uri("folder10"));
+    await vscode.workspace.fs.createDirectory(uri("folder2"));
+    for (const name of ["file10.txt", "file2.txt"]) { await vscode.workspace.fs.writeFile(uri(name), Buffer.from(name)); }
+    const added = ["file10.txt", "folder10", "file2.txt", "folder2"];
+    await tree.add(added.map(uri));
+    assert.deepStrictEqual((await tree.getChildren()).map(item => item.path.split("/").pop()), added);
+    await tree.setSortOrder("files");
+    assert.deepStrictEqual((await tree.getChildren()).map(item => item.path.split("/").pop()), ["folder2", "folder10", "file2.txt", "file10.txt"]);
+    tree.dispose();
+    tree = new VirtualWorkspace(state);
+    assert.strictEqual(tree.getSortOrder(), "files");
+    await tree.setSortOrder("added");
+    assert.deepStrictEqual((await tree.getChildren()).map(item => item.path.split("/").pop()), added);
+  });
+
+  test("filename filtering preserves ancestors, respects exclusions, and rejects invalid patterns", async () => {
+    await vscode.workspace.fs.createDirectory(uri("nested/deep"));
+    await vscode.workspace.fs.writeFile(uri("nested/deep/Target.ts"), Buffer.from("target"));
+    await vscode.workspace.fs.writeFile(uri("nested/hidden.ts"), Buffer.from("hidden"));
+    await vscode.workspace.fs.writeFile(uri("other.txt"), Buffer.from("other"));
+    await tree.add([root]);
+    await tree.remove(uri("nested/hidden.ts"));
+    tree.setFilter({ query: ".ts", matchCase: false, wholeWord: false, regex: false });
+    assert.deepStrictEqual((await tree.getChildren(root)).map(item => item.toString()), [uri("nested").toString()]);
+    assert.deepStrictEqual((await tree.getChildren(uri("nested"))).map(item => item.toString()), [uri("nested/deep").toString()]);
+    assert.deepStrictEqual((await tree.getFilteredFiles()).map(item => item.toString()), [uri("nested/deep/Target.ts").toString()]);
+    assert.strictEqual((await tree.getTreeItem(uri("nested"))).collapsibleState, vscode.TreeItemCollapsibleState.Expanded);
+    assert.throws(() => tree.setFilter({ query: "[", matchCase: false, wholeWord: false, regex: true }));
+    assert.strictEqual(tree.getFilter().query, ".ts");
+    await tree.saveFilter();
+    tree.dispose();
+    tree = new VirtualWorkspace(state);
+    assert.strictEqual(tree.getFilter().query, ".ts");
+    tree.setFilter({ ...tree.getFilter(), query: "no-match" });
+    assert.deepStrictEqual(await tree.getChildren(), []);
+    tree.setFilter({ ...tree.getFilter(), query: "" });
+    assert.strictEqual((await tree.getChildren(root)).length, 2);
+    // Filtering is a display/range choice, not a removal from the virtual workspace baseline.
+    assert.ok((await tree.prepareExport()).packet.operations.some(op => op.path === location("other.txt").path));
+  });
+
+  test("filter controls drive title exports and an empty result never falls back to a full export", async () => {
+    for (const name of ["keep.ts", "other.txt"]) { await vscode.workspace.fs.writeFile(uri(name), Buffer.from(name)); }
+    await vscode.commands.executeCommand("naruto.virtualWorkspace.add", root);
+    await vscode.commands.executeCommand("list.selectAll");
+    const originalInput = vscode.window.createInputBox;
+    const originalError = vscode.window.showErrorMessage;
+    const oldClipboard = await vscode.env.clipboard.readText();
+    let error = "";
+    let query = "^keep\\.ts$";
+    let first = true;
+    let clear = false;
+    vscode.window.showErrorMessage = (async (message: string) => { error = message; return undefined; }) as typeof originalError;
+    vscode.window.createInputBox = () => {
+      const changed = new vscode.EventEmitter<string>();
+      const triggered = new vscode.EventEmitter<vscode.QuickInputButton>();
+      const accepted = new vscode.EventEmitter<void>();
+      const hidden = new vscode.EventEmitter<void>();
+      const input = {
+        value: "", buttons: [] as readonly vscode.QuickInputButton[], validationMessage: undefined,
+        onDidChangeValue: changed.event, onDidTriggerButton: triggered.event, onDidAccept: accepted.event, onDidHide: hidden.event,
+        show() {
+          input.value = query;
+          changed.fire(query);
+          if (first) {
+            triggered.fire(input.buttons[2]);
+            first = false;
+          }
+          if (clear) { triggered.fire(input.buttons[3]); }
+          accepted.fire();
+        },
+        hide() { hidden.fire(); },
+        dispose() { [changed, triggered, accepted, hidden].forEach(item => item.dispose()); },
+      };
+      return input as unknown as vscode.InputBox;
+    };
+    try {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.filter");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      const metadata = JSON.parse(await vscode.env.clipboard.readText()) as WorkspaceExportMetadata;
+      const chunks: string[] = [];
+      for (let i = 0; i < metadata.chunkCount; i++) {
+        await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+        chunks.push(await vscode.env.clipboard.readText());
+      }
+      assert.deepStrictEqual((await decodePacket(chunks.join(""))).operations, [write("keep.ts", "keep.ts")]);
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.exportFull", root);
+      const scopedHeader = JSON.parse(await vscode.env.clipboard.readText()) as WorkspaceExportMetadata;
+      const scopedChunks: string[] = [];
+      for (let i = 0; i < scopedHeader.chunkCount; i++) {
+        await vscode.commands.executeCommand("naruto.virtualWorkspace.exportFull", root);
+        scopedChunks.push(await vscode.env.clipboard.readText());
+      }
+      assert.deepStrictEqual((await decodePacket(scopedChunks.join(""))).operations, [write("keep.ts", "keep.ts")]);
+      query = "missing";
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.filter");
+      const previous = await vscode.env.clipboard.readText();
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export");
+      assert.strictEqual(await vscode.env.clipboard.readText(), previous);
+      assert.match(error, /没有匹配的文件/);
+      clear = true;
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.filter");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.exportFull");
+      const unfilteredHeader = JSON.parse(await vscode.env.clipboard.readText()) as WorkspaceExportMetadata;
+      const unfilteredChunks: string[] = [];
+      for (let i = 0; i < unfilteredHeader.chunkCount; i++) {
+        await vscode.commands.executeCommand("naruto.virtualWorkspace.exportFull");
+        unfilteredChunks.push(await vscode.env.clipboard.readText());
+      }
+      assert.ok((await decodePacket(unfilteredChunks.join(""))).operations.some(op => op.path === location("other.txt").path));
+    } finally {
+      vscode.window.createInputBox = originalInput;
+      vscode.window.showErrorMessage = originalError;
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.clearFilter");
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", root);
+      await vscode.env.clipboard.writeText(oldClipboard);
+    }
+  });
+
   test("node export scopes files and folders while preserving paths and exclusions", async () => {
     await vscode.workspace.fs.createDirectory(uri("nested"));
     await vscode.workspace.fs.writeFile(uri("nested/keep.txt"), Buffer.from("keep"));
@@ -322,11 +452,115 @@ suite("Naruto virtual workspace", () => {
       await next(uri("second.txt"));
       assert.deepStrictEqual((await decodePacket(await vscode.env.clipboard.readText())).operations, [write("second.txt", "second")]);
       await next(uri("first.txt"));
-      await next();
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.continueExport");
       assert.deepStrictEqual((await decodePacket(await vscode.env.clipboard.readText())).operations, [write("first.txt", "first")]);
+      await next(uri("first.txt"));
+      await next();
+      assert.strictEqual(JSON.parse(await vscode.env.clipboard.readText()).format, "naruto-virtual-workspace-export");
     } finally {
       await vscode.commands.executeCommand("naruto.virtualWorkspace.cancelExport");
       await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", root);
+      await vscode.env.clipboard.writeText(oldClipboard);
+    }
+  });
+
+  test("title and selected item buttons share the selected range; unselected items use their own scope", () => {
+    const selected = [uri("one"), uri("two.txt")];
+    assert.deepStrictEqual(selectedExportScope(undefined, selected), selected);
+    assert.deepStrictEqual(selectedExportScope(uri("two.txt"), selected), selected);
+    assert.deepStrictEqual(selectedExportScope(uri("other.txt"), selected).map(item => item.toString()), [uri("other.txt").toString()]);
+    assert.deepStrictEqual(selectedExportScope(undefined, []), []);
+  });
+
+  test("range exports deduplicate descendants and keep a baseline independent of selection order", async () => {
+    await vscode.workspace.fs.createDirectory(uri("nested"));
+    await vscode.workspace.fs.writeFile(uri("nested/a.txt"), Buffer.from("a"));
+    await vscode.workspace.fs.writeFile(uri("b.txt"), Buffer.from("b"));
+    await vscode.workspace.fs.writeFile(uri("outside.txt"), Buffer.from("outside"));
+    await tree.add([root]);
+    const scope = [uri("nested/a.txt"), uri("b.txt"), uri("nested"), uri("b.txt")];
+    const first = await tree.prepareExport(scope);
+    assert.deepStrictEqual(first.packet.operations, [
+      write("b.txt", "b"), { ...location("nested"), action: "mkdir" }, write("nested/a.txt", "a"),
+    ]);
+    await first.confirm();
+    const reordered = await tree.prepareExport([uri("nested"), uri("b.txt")]);
+    assert.strictEqual(reordered.packet.snapshot?.base, first.packet.snapshot?.id);
+    assert.deepStrictEqual(reordered.packet.operations, []);
+    assert.strictEqual((await tree.prepareExport(uri("b.txt"))).packet.snapshot?.base, undefined);
+  });
+
+  test("mixed export modes send full items and changes from incremental items in the same range", async () => {
+    await vscode.workspace.fs.createDirectory(uri("full"));
+    await vscode.workspace.fs.writeFile(uri("full/keep.txt"), Buffer.from("keep"));
+    await vscode.workspace.fs.writeFile(uri("full/removed.txt"), Buffer.from("removed"));
+    await vscode.workspace.fs.writeFile(uri("incremental.txt"), Buffer.from("before"));
+    await tree.add([root]);
+    await tree.setExportMode([uri("full")], "full");
+    const scope = [uri("full"), uri("incremental.txt")];
+    const initial = await tree.prepareExport(scope);
+    await initial.confirm();
+    await tree.remove(uri("full/removed.txt"));
+    const next = await tree.prepareExport(scope);
+    assert.strictEqual(next.packet.snapshot?.base, initial.packet.snapshot?.id);
+    assert.deepStrictEqual(next.packet.replace, [location("full")]);
+    assert.deepStrictEqual(next.packet.operations, [{ ...location("full"), action: "mkdir" }, write("full/keep.txt", "keep")]);
+    await vscode.workspace.fs.writeFile(uri("incremental.txt"), Buffer.from("after"));
+    assert.ok((await tree.prepareExport(scope)).packet.operations.some(op => op.path === location("incremental.txt").path && op.action === "write"));
+    await tree.setExportMode([uri("incremental.txt")], "full");
+    const full = await tree.prepareExport(scope);
+    assert.strictEqual(full.packet.snapshot?.base, undefined);
+    assert.strictEqual(full.packet.replace, undefined);
+  });
+
+  test("per-item modes persist and incremental items show a leading icon", async () => {
+    await vscode.workspace.fs.writeFile(uri("a.txt"), Buffer.from("a"));
+    await vscode.workspace.fs.writeFile(uri("b.txt"), Buffer.from("b"));
+    await tree.add([root]);
+    const initial = await tree.getTreeItem(uri("a.txt"));
+    assert.strictEqual((initial.iconPath as vscode.ThemeIcon).id, "diff");
+    await tree.setExportMode([uri("a.txt")], "full");
+    assert.strictEqual((await tree.getTreeItem(uri("a.txt"))).contextValue, "file:full");
+    assert.strictEqual(((await tree.getTreeItem(uri("a.txt"))).iconPath as vscode.ThemeIcon).id, "file");
+    tree.dispose();
+    tree = new VirtualWorkspace(state);
+    assert.strictEqual(tree.getExportMode(uri("a.txt")), "full");
+    assert.strictEqual(tree.getExportMode(uri("b.txt")), "incremental");
+    await tree.setExportMode([uri("a.txt"), uri("b.txt")], "incremental");
+    assert.strictEqual((await tree.getTreeItem(uri("a.txt"))).contextValue, "file:incremental");
+  });
+
+  test("commands use multi-selection for export and mode switching", async () => {
+    await vscode.workspace.fs.writeFile(uri("a.txt"), Buffer.from("a"));
+    await vscode.workspace.fs.writeFile(uri("b.txt"), Buffer.from("b"));
+    await vscode.workspace.fs.writeFile(uri("outside.txt"), Buffer.from("outside"));
+    await vscode.commands.executeCommand("naruto.virtualWorkspace.add", root);
+    const selected = [uri("a.txt"), uri("b.txt")];
+    const oldClipboard = await vscode.env.clipboard.readText();
+    const complete = async (clicked?: vscode.Uri) => {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export", clicked, selected);
+      const header = JSON.parse(await vscode.env.clipboard.readText()) as WorkspaceExportMetadata;
+      const chunks: string[] = [];
+      for (let i = 0; i < header.chunkCount; i++) {
+        await vscode.commands.executeCommand("naruto.virtualWorkspace.export", clicked, selected);
+        chunks.push(await vscode.env.clipboard.readText());
+      }
+      const data = await decodePacket(chunks.join(""));
+      assert.deepStrictEqual(header.snapshot, data.snapshot);
+      assert.deepStrictEqual(data.operations, [write("a.txt", "a"), write("b.txt", "b")]);
+    };
+    try {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.setFullMode", uri("a.txt"), selected);
+      vscode.window.showInformationMessage = (async () => "接收成功") as typeof originalInformation;
+      await complete(uri("b.txt"));
+      await complete();
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.setIncrementalMode", uri("b.txt"), selected);
+      const previous = await vscode.env.clipboard.readText();
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.export", undefined, selected);
+      assert.strictEqual(await vscode.env.clipboard.readText(), previous);
+    } finally {
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.remove", root);
+      await vscode.commands.executeCommand("naruto.virtualWorkspace.cancelExport");
       await vscode.env.clipboard.writeText(oldClipboard);
     }
   });
@@ -426,6 +660,91 @@ suite("Naruto virtual workspace", () => {
     assert.strictEqual(await read("first.txt"), "applied");
   });
 
+  test("incremental exports use only confirmed snapshots and persist hashes", async () => {
+    await vscode.workspace.fs.writeFile(uri("a.txt"), Buffer.from("first"));
+    await tree.add([root]);
+    const first = await tree.prepareExport();
+    assert.deepStrictEqual((await tree.prepareExport()).packet, first.packet);
+    assert.strictEqual(first.packet.snapshot?.base, undefined);
+    await first.confirm();
+    assert.strictEqual((await tree.prepareExport()).packet.snapshot?.base, first.packet.snapshot?.id);
+    assert.deepStrictEqual((await tree.prepareExport()).packet.operations, []);
+    await vscode.workspace.fs.writeFile(uri("a.txt"), Buffer.from("second"));
+    assert.deepStrictEqual((await tree.prepareExport()).packet.operations, [write("a.txt", "second")]);
+    const recreated = new VirtualWorkspace(state);
+    try {
+      assert.deepStrictEqual((await recreated.prepareExport()).packet.operations, [write("a.txt", "second")]);
+    } finally { recreated.dispose(); }
+    await tree.remove(uri("a.txt"));
+    assert.deepStrictEqual((await tree.prepareExport()).packet.operations, [{ ...location("a.txt"), action: "delete" }]);
+    assert.strictEqual(await read("a.txt"), "second");
+    const full = await tree.prepareExport(undefined, true);
+    assert.strictEqual(full.packet.snapshot?.base, undefined);
+    assert.ok(full.packet.operations.every(op => op.action !== "delete"));
+  });
+
+  test("removal configuration preserves deselected files but exports real deletions", async () => {
+    const config = vscode.workspace.getConfiguration("naruto");
+    await config.update("virtualWorkspace.deleteRemoved", false, vscode.ConfigurationTarget.Workspace);
+    try {
+      await vscode.workspace.fs.writeFile(uri("a.txt"), Buffer.from("first"));
+      await tree.add([root]);
+      await (await tree.prepareExport()).confirm();
+      await tree.remove(uri("a.txt"));
+      assert.deepStrictEqual((await tree.prepareExport()).packet.operations, []);
+      await vscode.workspace.fs.delete(uri("a.txt"));
+      assert.deepStrictEqual((await tree.prepareExport()).packet.operations, [{ ...location("a.txt"), action: "delete" }]);
+    } finally {
+      await config.update("virtualWorkspace.deleteRemoved", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  test("incremental completion advances the baseline only after successful reception", async () => {
+    await vscode.workspace.fs.writeFile(uri("a.txt"), Buffer.from("first"));
+    await tree.add([uri("a.txt")]);
+    const exporter = new WorkspaceExporter(tree);
+    const originalClipboard = await vscode.env.clipboard.readText();
+    await (await tree.prepareExport()).confirm();
+    await vscode.workspace.fs.writeFile(uri("a.txt"), Buffer.from("changed"));
+    let answer: string | undefined = "接收失败";
+    vscode.window.showInformationMessage = (async () => answer) as typeof originalInformation;
+    try {
+      for (const success of [false, true]) {
+        answer = success ? "接收成功" : "接收失败";
+        await exporter.next();
+        const metadata = JSON.parse(await vscode.env.clipboard.readText()) as WorkspaceExportMetadata;
+        for (let i = 0; i < metadata.chunkCount; i++) { await exporter.next(); }
+        assert.strictEqual((await tree.prepareExport()).packet.operations.length, success ? 0 : 1);
+      }
+    } finally {
+      exporter.dispose();
+      await vscode.env.clipboard.writeText(originalClipboard);
+    }
+  });
+
+  test("full completion records the baseline without confirmation; cancelled copies do not", async () => {
+    await vscode.workspace.fs.writeFile(uri("a.txt"), Buffer.from("a"));
+    await tree.add([uri("a.txt")]);
+    const exporter = new WorkspaceExporter(tree);
+    const oldClipboard = await vscode.env.clipboard.readText();
+    let prompts = 0;
+    vscode.window.showInformationMessage = (async () => { prompts++; return undefined; }) as typeof originalInformation;
+    try {
+      await exporter.next();
+      exporter.cancel();
+      assert.strictEqual((await tree.prepareExport()).packet.snapshot?.base, undefined);
+      await exporter.next();
+      const header = JSON.parse(await vscode.env.clipboard.readText()) as WorkspaceExportMetadata;
+      for (let i = 0; i < header.chunkCount; i++) { await exporter.next(); }
+      assert.strictEqual(prompts, 0);
+      assert.strictEqual((await tree.prepareExport()).packet.snapshot?.base, header.snapshot?.id);
+      assert.deepStrictEqual((await tree.prepareExport()).packet.operations, []);
+    } finally {
+      exporter.dispose();
+      await vscode.env.clipboard.writeText(oldClipboard);
+    }
+  });
+
   test("metadata describes data blocks without being split or included in the checksum", () => {
     for (const [length, size, count] of [[3, 256, 1], [256, 256, 1], [512, 256, 2], [513, 256, 3], [3, 1, 3]]) {
       const text = "A".repeat(length);
@@ -448,7 +767,7 @@ suite("Naruto virtual workspace", () => {
   test("copies metadata first, then one data chunk per click from the same snapshot, and cancellation restarts", async () => {
     await vscode.workspace.fs.writeFile(uri("random.bin"), randomBytes(2048));
     await tree.add([uri("random.bin")]);
-    const exported = await tree.exportText();
+    const exported = await encodePacket((await tree.prepareExport()).packet);
     const expected = splitExport(exported);
     assert.ok(expected.length > 2);
     const exporter = new WorkspaceExporter(tree);

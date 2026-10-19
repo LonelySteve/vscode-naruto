@@ -142,6 +142,7 @@ final class Receiver: ObservableObject {
                 progressDetail = mode.isAutomatic ? "正在点击导出按钮 · ⌘⇧E 取消" : "现在手动点一次导出 · ⌘⇧E 取消"
                 if mode == .paste { progressDetail = "请粘贴并提交起始元信息 · ⌘⇧E 取消" }
                 let metadata = try ExportMetadata.parse(await receiveBlock(timeout: max(30, pace.clipboardTimeout)))
+                try ExportedFiles.checkBaseline(metadata.snapshot)
                 var collector = ExportCollector(metadata: metadata)
                 updateProgress(collector, mode: mode)
                 while !collector.isComplete {
@@ -149,13 +150,16 @@ final class Receiver: ObservableObject {
                     updateProgress(collector, mode: mode)
                 }
                 progressTitle = "校验并解压"
-                progressDetail = "正在还原文件到临时目录"
+                progressDetail = "正在根据已有副本还原完整文件包"
                 let completed = collector
                 let files = try await Task.detached(priority: .userInitiated) {
                     try ExportedFiles.extract(WorkspacePacket.decode(completed.verifiedText()))
                 }.value
                 try Task.checkCancellation()
                 result = files
+                notice = metadata.snapshot?.base == nil
+                    ? "接收成功，完整文件包已还原，副本已保存。"
+                    : "接收成功，完整文件包已还原，副本已保存。请在 VS Code 中确认接收成功。"
                 showWindow()
             } catch is CancellationError {
                 notice = "接收已取消。再次接收前，请先取消 VS Code 中未完成的 Naruto 导出。"

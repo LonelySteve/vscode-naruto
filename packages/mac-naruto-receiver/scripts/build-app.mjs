@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 if (process.platform !== 'darwin') throw new Error('Naruto Receiver requires macOS.');
 const root = fileURLToPath(new URL('..', import.meta.url));
+const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const run = (command, args) => execFileSync(command, args, { cwd: root, stdio: 'inherit' });
 run('swift', ['build', '-c', 'release', '--scratch-path', '.build']);
 const binaryDirectory = execFileSync('swift', ['build', '-c', 'release', '--scratch-path', '.build', '--show-bin-path'], { cwd: root, encoding: 'utf8' }).trim();
@@ -19,8 +20,8 @@ writeFileSync(join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8
   <key>CFBundleName</key><string>Naruto Receiver</string>
   <key>CFBundleDisplayName</key><string>Naruto Receiver</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
+  <key>CFBundleVersion</key><string>${version}</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

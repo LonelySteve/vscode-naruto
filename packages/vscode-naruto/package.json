@@ -2,7 +2,7 @@
   "name": "naruto",
   "displayName": "naruto",
   "description": "",
-  "version": "0.2.3",
+  "version": "0.5.1",
   "engines": {
     "vscode": "^1.72.0"
   },
@@ -91,13 +91,47 @@
       },
       {
         "command": "naruto.virtualWorkspace.export",
-        "title": "导出 Naruto 虚拟工作区：复制下一块",
+        "title": "导出 Naruto 虚拟工作区所选范围：复制下一块",
         "icon": "$(cloud-upload)"
       },
       {
         "command": "naruto.virtualWorkspace.cancelExport",
         "title": "取消 Naruto 虚拟工作区导出",
         "icon": "$(close)"
+      },
+      {
+        "command": "naruto.virtualWorkspace.exportFull",
+        "title": "全量导出 Naruto 虚拟工作区",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "naruto.virtualWorkspace.setIncrementalMode",
+        "title": "切换为增量导出模式",
+        "toggled": "viewItem =~ /:incremental$/"
+      },
+      {
+        "command": "naruto.virtualWorkspace.setFullMode",
+        "title": "切换为全量导出模式",
+        "toggled": "viewItem =~ /:full$/"
+      },
+      {
+        "command": "naruto.virtualWorkspace.filter",
+        "title": "按文件名筛选 Naruto 虚拟工作区",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "naruto.virtualWorkspace.clearFilter",
+        "title": "清除文件名筛选"
+      },
+      {
+        "command": "naruto.virtualWorkspace.sortAdded",
+        "title": "排序：按添加顺序",
+        "toggled": "naruto.virtualWorkspace.sortOrder == added"
+      },
+      {
+        "command": "naruto.virtualWorkspace.sortFiles",
+        "title": "排序：按实际文件顺序",
+        "toggled": "naruto.virtualWorkspace.sortOrder == files"
       }
     ],
     "configuration": {
@@ -155,6 +189,11 @@
           "default": 256,
           "minimum": 1,
           "description": "虚拟工作区压缩文本的数据分块大小（字节）。首次导出复制起始元信息，后续每次点击仅复制一个数据块；元信息始终完整复制。"
+        },
+        "naruto.virtualWorkspace.deleteRemoved": {
+          "type": "boolean",
+          "default": true,
+          "description": "增量导出时，为从虚拟工作区移除的资源生成 delete 操作。关闭后仅为真实路径已不存在的资源生成删除操作。不会删除发送端真实文件。"
         }
       }
     },
@@ -180,7 +219,13 @@
     "viewsWelcome": [
       {
         "view": "naruto.virtualWorkspace",
-        "contents": "在资源管理器中右键文件或文件夹，或右键文件 Tab，选择“添加到 Naruto 虚拟工作区”。\n这里的编辑、新建、重命名和删除会直接应用到真实工作区。\n[添加当前文件](command:naruto.virtualWorkspace.addCurrentFile)"
+        "contents": "在资源管理器中右键文件或文件夹，或右键文件 Tab，选择“添加到 Naruto 虚拟工作区”。\n这里的编辑、新建、重命名和删除会直接应用到真实工作区。\n[添加当前文件](command:naruto.virtualWorkspace.addCurrentFile)",
+        "when": "!naruto.virtualWorkspace.filterActive"
+      },
+      {
+        "view": "naruto.virtualWorkspace",
+        "when": "naruto.virtualWorkspace.filterActive",
+        "contents": "没有匹配的文件。\n[更改筛选](command:naruto.virtualWorkspace.filter) · [清除筛选](command:naruto.virtualWorkspace.clearFilter)"
       }
     ],
     "menus": {
@@ -232,18 +277,26 @@
         {
           "command": "naruto.virtualWorkspace.newFolder",
           "when": "false"
+        },
+        {
+          "command": "naruto.virtualWorkspace.setIncrementalMode",
+          "when": "false"
+        },
+        {
+          "command": "naruto.virtualWorkspace.setFullMode",
+          "when": "false"
         }
       ],
       "view/title": [
         {
           "command": "naruto.virtualWorkspace.newFile",
           "when": "view == naruto.virtualWorkspace",
-          "group": "navigation@1"
+          "group": "1_create@1"
         },
         {
           "command": "naruto.virtualWorkspace.newFolder",
           "when": "view == naruto.virtualWorkspace",
-          "group": "navigation@2"
+          "group": "1_create@2"
         },
         {
           "command": "naruto.virtualWorkspace.import",
@@ -258,12 +311,32 @@
         {
           "command": "naruto.virtualWorkspace.refresh",
           "when": "view == naruto.virtualWorkspace",
-          "group": "navigation@5"
+          "group": "3_actions@1"
         },
         {
           "command": "naruto.virtualWorkspace.clear",
           "when": "view == naruto.virtualWorkspace",
-          "group": "navigation@6"
+          "group": "4_manage@1"
+        },
+        {
+          "command": "naruto.virtualWorkspace.filter",
+          "when": "view == naruto.virtualWorkspace",
+          "group": "navigation@1"
+        },
+        {
+          "command": "naruto.virtualWorkspace.sortAdded",
+          "when": "view == naruto.virtualWorkspace",
+          "group": "2_sort@1"
+        },
+        {
+          "command": "naruto.virtualWorkspace.sortFiles",
+          "when": "view == naruto.virtualWorkspace",
+          "group": "2_sort@2"
+        },
+        {
+          "command": "naruto.virtualWorkspace.clearFilter",
+          "when": "view == naruto.virtualWorkspace && naruto.virtualWorkspace.filterActive",
+          "group": "3_actions@2"
         }
       ],
       "view/item/context": [
@@ -284,18 +357,28 @@
         },
         {
           "command": "naruto.virtualWorkspace.rename",
-          "when": "view == naruto.virtualWorkspace && viewItem != workspaceRoot",
+          "when": "view == naruto.virtualWorkspace && !(viewItem =~ /^workspaceRoot:/)",
           "group": "2_modify@1"
         },
         {
           "command": "naruto.virtualWorkspace.delete",
-          "when": "view == naruto.virtualWorkspace && viewItem != workspaceRoot",
+          "when": "view == naruto.virtualWorkspace && !(viewItem =~ /^workspaceRoot:/)",
           "group": "2_modify@2"
         },
         {
           "command": "naruto.virtualWorkspace.remove",
           "when": "view == naruto.virtualWorkspace",
           "group": "3_selection@1"
+        },
+        {
+          "command": "naruto.virtualWorkspace.setIncrementalMode",
+          "when": "view == naruto.virtualWorkspace",
+          "group": "7_export@1"
+        },
+        {
+          "command": "naruto.virtualWorkspace.setFullMode",
+          "when": "view == naruto.virtualWorkspace",
+          "group": "7_export@2"
         }
       ]
     }

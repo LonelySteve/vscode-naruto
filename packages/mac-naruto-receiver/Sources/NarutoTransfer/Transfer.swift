@@ -19,6 +19,7 @@ public struct ExportMetadata: Decodable, Sendable {
     public let chunkSize: Int
     public let byteLength: Int
     public let checksum: Checksum
+    public let snapshot: WorkspacePacket.Snapshot?
 
     public static func parse(_ text: String) throws -> Self {
         guard let metadata = try? JSONDecoder().decode(Self.self, from: Data(text.utf8)),
@@ -30,6 +31,7 @@ public struct ExportMetadata: Decodable, Sendable {
               metadata.checksum.value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw TransferError("未收到 Naruto 起始元信息。请先取消 VS Code 中未完成的导出，再将鼠标放到导出按钮上重试。")
         }
+        try metadata.snapshot?.validate()
         return metadata
     }
 }
@@ -128,6 +130,25 @@ public struct WorkspacePacket: Decodable, Sendable {
     }
     public let format: String
     public let version: Int
+    public struct Snapshot: Decodable, Sendable {
+        public let id: String
+        public let base: String?
+
+        func validate() throws {
+            func validID(_ value: String) -> Bool {
+                value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+            }
+            guard validID(id), base.map(validID) ?? true else {
+                throw TransferError("导出快照基线标识无效")
+            }
+        }
+    }
+    public struct Location: Decodable, Sendable {
+        public let workspace: String
+        public let path: String
+    }
+    public let snapshot: Snapshot?
+    public let replace: [Location]?
     public let operations: [Operation]
 
     public static func decode(_ text: String) throws -> Self {
@@ -143,20 +164,29 @@ public struct WorkspacePacket: Decodable, Sendable {
         guard packet.format == "naruto-virtual-workspace", packet.version == 1 else {
             throw TransferError("不是受支持的 Naruto 工作区快照")
         }
+        try packet.snapshot?.validate()
+        if packet.snapshot?.base == nil && packet.operations.contains(where: { $0.action == "delete" }) {
+            throw TransferError("删除操作需要增量基线，请重新全量导出。")
+        }
+        for location in packet.replace ?? [] {
+            guard validComponent(location.workspace), validPath(location.path) else {
+                throw TransferError("全量替换范围包含不安全的工作区名称或路径")
+            }
+        }
         for op in packet.operations {
             guard validComponent(op.workspace), validPath(op.path),
                   op.path != "." || op.action == "mkdir" else {
                 throw TransferError("快照包含不安全的工作区名称或路径：\(op.workspace)/\(op.path)")
             }
             switch op.action {
-            case "mkdir": break
+            case "mkdir", "delete": break
             case "write":
                 guard let content = op.content, let encoding = op.encoding,
                       encoding == "utf8" || (encoding == "base64" && Data(base64Encoded: content)?.base64EncodedString() == content) else {
                     throw TransferError("文件内容编码无效：\(op.path)")
                 }
             default:
-                throw TransferError("导出快照仅支持 write 和 mkdir，不执行 \(op.action) 操作")
+                throw TransferError("导出快照仅支持 write、mkdir 和 delete，不执行 \(op.action) 操作")
             }
         }
         return packet

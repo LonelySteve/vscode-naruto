@@ -17,6 +17,8 @@ export interface WorkspacePacket {
   format: "naruto-virtual-workspace";
   version: 1;
   operations: WorkspaceOperation[];
+  snapshot?: { id: string; base?: string };
+  replace?: Location[];
 }
 
 export interface WorkspaceExportMetadata {
@@ -26,6 +28,7 @@ export interface WorkspaceExportMetadata {
   chunkSize: number;
   byteLength: number;
   checksum: { algorithm: "sha256"; value: string };
+  snapshot?: WorkspacePacket["snapshot"];
 }
 
 const codec = createCompress<string, Promise<string>>();
@@ -40,6 +43,15 @@ export function parsePacket(text: string): WorkspacePacket {
   const packet = JSON.parse(text);
   if (packet?.format !== "naruto-virtual-workspace" || packet.version !== 1 || !Array.isArray(packet.operations)) {
     throw new Error("不是受支持的 Naruto 虚拟工作区数据包");
+  }
+  if (packet.snapshot !== undefined && (!packet.snapshot ||
+    !/^[a-f0-9]{64}$/.test(packet.snapshot.id) ||
+    (packet.snapshot.base !== undefined && !/^[a-f0-9]{64}$/.test(packet.snapshot.base)))) {
+    throw new Error("导出快照基线标识无效");
+  }
+  if (packet.replace !== undefined && (!Array.isArray(packet.replace) || packet.replace.some((location: Location) =>
+    !location || typeof location.workspace !== "string" || !location.workspace || !validPath(location.path)))) {
+    throw new Error("全量替换范围无效");
   }
   for (const [index, op] of packet.operations.entries()) {
     const fail = () => { throw new Error(`第 ${index + 1} 项操作格式无效`); };
@@ -94,7 +106,7 @@ export function splitExport(text: string, size = 256): string[] {
   return chunks;
 }
 
-export function createExportBlocks(text: string, size = 256): string[] {
+export function createExportBlocks(text: string, size = 256, snapshot?: WorkspacePacket["snapshot"]): string[] {
   const chunks = splitExport(text, size);
   const metadata: WorkspaceExportMetadata = {
     format: "naruto-virtual-workspace-export",
@@ -102,6 +114,7 @@ export function createExportBlocks(text: string, size = 256): string[] {
     chunkCount: chunks.length,
     chunkSize: size,
     byteLength: Buffer.byteLength(text, "utf8"),
+    ...(snapshot ? { snapshot } : {}),
     checksum: {
       algorithm: "sha256",
       value: createHash("sha256").update(text, "utf8").digest("hex"),
